@@ -3,7 +3,7 @@ CFLAGS = -Wall -Wextra -std=c99
 
 SRCS = main.c buffer.c math_utils.c
 OBJS = $(SRCS:.c=.o)
-TARGET = c_bugs_demo
+TARGET = c_bugs_demo.out
 
 all: $(TARGET)
 
