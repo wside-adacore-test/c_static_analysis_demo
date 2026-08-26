@@ -23,11 +23,11 @@ def get_codesonar_score_color(score: float) -> str:
     Returns the color band for a given CodeSonar score.
     """
     if score <= 21.0:
-        return "Green"
+        return "Green (low)"
     elif score <= 56.0:
-        return "Yellow"
+        return "Yellow (medium)"
     else:
-        return "Red"
+        return "Red (high)"
 
 if len(sys.argv) < 2:
     print("Usage: python3 fixup_sarif.py <input_sarif_path> [output_sarif_path]")
@@ -115,7 +115,7 @@ for run in data.get("runs", []):
             cs_header = (
                 f"### CodeSonar Warning Details\n"
                 f"- **CS_Warning-ID:** `{warning_id}`\n"
-                f"- **CS_Score:** `{score_str}`\n"
+                f"- **CS_Score [0-100]:** `{score_str}`\n"
                 f"- **CS_Score-Color:** `{score_color}`\n"
                 f"- **CS_Score-Level:** `{score_level}`\n"
             )

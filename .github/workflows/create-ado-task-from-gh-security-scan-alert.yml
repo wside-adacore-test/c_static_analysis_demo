@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       title:
-        description: 'Task Title (Optional - defaults to Alert Rule Description)'
+        description: 'Task Title (Optional - auto-generated from alert details if left blank)'
         required: false
         type: string
 
@@ -30,7 +30,7 @@ jobs:
           ALERT_NUM: ${{ inputs.alert_number }}
           USER_TITLE: ${{ inputs.title }}
         run: |
-          # 1. Fetch Alert JSON with error checks
+          # 1. Fetch Alert JSON from GitHub API
           ALERT_JSON=$(curl -s -S --fail \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
@@ -42,41 +42,130 @@ jobs:
           fi
 
           RULE_ID=$(echo "$ALERT_JSON" | jq -r '.rule.id // "N/A"')
-          # Look for the short name like "Use After Free"
           RULE_DESC=$(echo "$ALERT_JSON" | jq -r '(.rule.description // empty) // (.rule.name // empty) // "Security Alert"')
-          FILE_PATH=$(echo "$ALERT_JSON" | jq -r '.most_recent_instance.location.path // "N/A"')
+          FILE_PATH=$(echo "$ALERT_JSON" | jq -r '.most_recent_instance.location.path // ""')
           START_LINE=$(echo "$ALERT_JSON" | jq -r '.most_recent_instance.location.start_line // "N/A"')
           HTML_URL=$(echo "$ALERT_JSON" | jq -r '.html_url // ""')
 
-          # Extract raw markdown body (help usually contains the third-party SARIF markdown)
-          RAW_MARKDOWN=$(echo "$ALERT_JSON" | jq -r '
-            (.rule.help // empty) // 
-            (.rule.full_description // empty) // 
-            (.most_recent_instance.message.text // empty) // 
-            "No detailed description provided by the scanning tool."
+          # Extract filename from path (e.g., path/to/main.c -> main.c)
+          FILENAME=""
+          if [ -n "$FILE_PATH" ]; then
+            FILENAME="${FILE_PATH##*/}"
+          fi
+
+          # 2. Extract CS_ID and RAW_SCORE safely via Python
+          PARSED_VALUES=$(echo "$ALERT_JSON" | python3 -c '
+          import sys, json, re
+          try:
+              data = json.load(sys.stdin)
+          except Exception:
+              sys.exit(0)
+
+          rule = data.get("rule", {})
+          mri = data.get("most_recent_instance", {})
+
+          sources = []
+          help_val = rule.get("help")
+          if isinstance(help_val, str):
+              sources.append(help_val)
+          elif isinstance(help_val, dict):
+              sources.append(help_val.get("markdown", ""))
+              sources.append(help_val.get("text", ""))
+
+          if rule.get("full_description"):
+              sources.append(str(rule["full_description"]))
+
+          if mri.get("message", {}).get("text"):
+              sources.append(str(mri["message"]["text"]))
+
+          if rule.get("id"):
+              sources.append(str(rule["id"]))
+
+          combined_text = "\n".join(sources)
+
+          cs_id_match = re.search(r"(?:CS_Warning-ID|CS-ID|Warning ID).*?:[^\d]*?(\d+\.\d+)", combined_text, re.IGNORECASE)
+          if not cs_id_match:
+              cs_id_match = re.search(r"\b(\d{3,4}\.\d+)\b", combined_text)
+          cs_id = cs_id_match.group(1) if cs_id_match else ""
+
+          score_match = re.search(r"(?:CS_Score|Score).*?:[^\d]*?(\d+)", combined_text, re.IGNORECASE)
+          raw_score = score_match.group(1) if score_match else ""
+
+          print(f"{cs_id}|{raw_score}")
           ')
 
-          # 2. Render Markdown into HTML via GitHub API
+          CS_ID=$(echo "$PARSED_VALUES" | cut -d'|' -f1)
+          RAW_SCORE=$(echo "$PARSED_VALUES" | cut -d'|' -f2)
+
+          # 3. Process Score, Zero-padding, and Severity Level
+          PADDED_SCORE=""
+          TITLE_LEVEL=""
+          if [ -n "$RAW_SCORE" ]; then
+            PADDED_SCORE=$(printf "%03d" "$RAW_SCORE" 2>/dev/null || echo "$RAW_SCORE")
+            
+            if [ "$RAW_SCORE" -le 21 ]; then
+              TITLE_LEVEL="low"
+            elif [ "$RAW_SCORE" -le 56 ]; then
+              TITLE_LEVEL="medium"
+            else
+              TITLE_LEVEL="high"
+            fi
+          fi
+
+          # 4. Formulate Title with specific spacing/commas inside prefix bracket
+          if [ -n "$USER_TITLE" ]; then
+            FINAL_TITLE="$USER_TITLE"
+          else
+            PREFIX=""
+            
+            if [ -n "$PADDED_SCORE" ]; then
+              PREFIX="CS_Score $PADDED_SCORE ($TITLE_LEVEL), "
+            fi
+            
+            if [ -n "$CS_ID" ]; then
+              PREFIX="${PREFIX}CS_ID $CS_ID,"
+            elif [ -n "$PREFIX" ]; then
+              PREFIX="${PREFIX%, },"
+            fi
+            
+            PREFIX="${PREFIX}GH #$ALERT_NUM"
+
+            TITLE_BODY="$RULE_DESC"
+            if [ -n "$FILENAME" ]; then
+              TITLE_BODY="$TITLE_BODY, $FILENAME"
+            fi
+
+            FINAL_TITLE="[$PREFIX] $TITLE_BODY"
+          fi
+
+          # 5. Extract Markdown Body safely
+          RAW_MARKDOWN=$(echo "$ALERT_JSON" | jq -r '
+            if (.rule.help | type) == "object" then
+              (.rule.help.markdown // .rule.help.text // "")
+            elif (.rule.help | type) == "string" then
+              .rule.help
+            else
+              (.rule.full_description // .most_recent_instance.message.text // "")
+            end
+          ')
+
+          # Render Markdown into HTML via GitHub API for Body
           HTML_BODY=$(curl -s -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             https://api.github.com/markdown \
             -d "$(jq -n --arg text "$RAW_MARKDOWN" '{text: $text}')")
 
-          # 3. Formulate Title securely
-          BASE_TITLE="${USER_TITLE:-$RULE_DESC}"
-          FINAL_TITLE="[GH Scan Alert #${ALERT_NUM}] ${BASE_TITLE}"
-
-          # 4. Construct ADO HTML Description
+          # 6. Construct ADO HTML Description
           FULL_DESCRIPTION="<b>GitHub Security Alert #${ALERT_NUM}</b><br/>"
           FULL_DESCRIPTION+="<b>Rule:</b> ${RULE_ID}<br/>"
           FULL_DESCRIPTION+="<b>Location:</b> <code>${FILE_PATH}</code> (Line ${START_LINE})<br/>"
           FULL_DESCRIPTION+="<b>Link:</b> <a href=\"${HTML_URL}\">${HTML_URL}</a><hr/>"
           FULL_DESCRIPTION+="<h3>Alert Details</h3>${HTML_BODY}"
 
-          TAGS="Security; GH-Alert-${ALERT_NUM}; ${RULE_ID}"
+          TAGS="CodeSonar; GitHub-Scan"
 
-          # 5. Build full JSON payload via jq
+          # 7. Post Payload to Azure DevOps
           PAYLOAD=$(jq -n \
             --arg title "$FINAL_TITLE" \
             --arg desc "$FULL_DESCRIPTION" \
@@ -87,11 +176,11 @@ jobs:
               {"op": "add", "path": "/fields/System.Tags", "value": $tags}
             ]')
 
-          # 6. Post Payload to Azure DevOps
           curl -s -S --fail-with-body -X POST \
             -u ":$ADO_PAT" \
             -H "Content-Type: application/json-patch+json" \
             "https://dev.azure.com/$ADO_ORG/$ADO_PROJECT/_apis/wit/workitems/\$Task?api-version=7.1" \
             -d "$PAYLOAD"
 
-          echo "Successfully created Azure Work Item for Security Alert #${ALERT_NUM}!"
+          echo "Successfully created Azure Work Item!"
+          echo "Title: $FINAL_TITLE"
