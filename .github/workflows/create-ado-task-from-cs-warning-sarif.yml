@@ -1,4 +1,4 @@
-name: Create Azure Work Item for CodeSonar Warning
+name: Create Azure Work Item for CodeSonar Warning Auto from SARIF
 
 on:
   workflow_dispatch:

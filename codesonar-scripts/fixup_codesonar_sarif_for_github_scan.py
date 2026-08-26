@@ -44,7 +44,19 @@ with open(input_path, "r") as f:
     data = json.load(f)
 
 for run in data.get("runs", []):
-    driver = run.get("tool", {}).get("driver", {})
+    # Set the SARIF category for category-level UI filtering
+    run["automationDetails"] = {
+        "id": "codesonar-clean"
+    }
+
+    tool = run.get("tool", {})
+    if "driver" not in tool:
+        tool["driver"] = {}
+    driver = tool["driver"]
+
+    # Set tool name to isolate from previous tool history
+    driver["name"] = "codesonar-scan"
+
     rules_dict = {rule["id"]: rule for rule in driver.get("rules", [])}
     
     rule_max_scores = {}

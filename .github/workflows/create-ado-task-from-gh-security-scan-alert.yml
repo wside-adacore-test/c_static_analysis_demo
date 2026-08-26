@@ -65,7 +65,7 @@ jobs:
 
           # 3. Formulate Title securely
           BASE_TITLE="${USER_TITLE:-$RULE_DESC}"
-          FINAL_TITLE="[GitHub Code Scanning Alert #${ALERT_NUM}] ${BASE_TITLE}"
+          FINAL_TITLE="[GH Scan Alert #${ALERT_NUM}] ${BASE_TITLE}"
 
           # 4. Construct ADO HTML Description
           FULL_DESCRIPTION="<b>GitHub Security Alert #${ALERT_NUM}</b><br/>"

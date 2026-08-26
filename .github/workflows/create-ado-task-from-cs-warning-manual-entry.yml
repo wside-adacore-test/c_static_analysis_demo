@@ -1,0 +1,141 @@
+name: Create Azure Work Item for CodeSonar Warning Manual Entry
+
+on:
+  workflow_dispatch:
+    inputs:
+      warning_id:
+        description: 'CodeSonar Warning ID (e.g., 406.6049)'
+        required: true
+        type: string
+      warning_name:
+        description: 'Warning Name/Type (e.g., Buffer Overrun)'
+        required: true
+        type: string
+      title:
+        description: 'Task Title (Optional - auto-generated if left blank)'
+        required: false
+        type: string
+      cs_score:
+        description: 'CodeSonar Warning Score (e.g., 68)'
+        required: false
+        type: string
+      filename:
+        description: 'Filename (e.g., math_utils.c)'
+        required: false
+        type: string
+      hub_url:
+        description: 'CodeSonar Hub Base URL'
+        required: false
+        default: 'http://localhost:7341'
+        type: string
+      hub_link_override:
+        description: 'CodeSonar Hub Warning Link Override (Optional)'
+        required: false
+        type: string
+
+jobs:
+  create-azure-work-item:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create Azure DevOps Task
+        env:
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+          ADO_ORG: "wside"
+          ADO_PROJECT: "test-devops"
+        run: |
+          WARNING_ID="${{ inputs.warning_id }}"
+          WARNING_NAME="${{ inputs.warning_name }}"
+          USER_TITLE="${{ inputs.title }}"
+          RAW_SCORE="${{ inputs.cs_score }}"
+          FILENAME="${{ inputs.filename }}"
+          HUB_URL="${{ inputs.hub_url }}"
+          HUB_LINK_OVERRIDE="${{ inputs.hub_link_override }}"
+
+          # 1. Clean trailing slashes from HUB_URL
+          HUB_URL="${HUB_URL%/}"
+
+          # 2. Extract warning instance ID (digits after decimal) and construct default link
+          INSTANCE_ID="${WARNING_ID##*.}"
+          DEFAULT_LINK="$HUB_URL/warninginstance/$INSTANCE_ID.html"
+
+          if [ -n "$HUB_LINK_OVERRIDE" ]; then
+            FINAL_LINK="$HUB_LINK_OVERRIDE"
+          else
+            FINAL_LINK="$DEFAULT_LINK"
+          fi
+
+          # 3. Format CS Score (3-digit zero pad, title label, and description level evaluation)
+          PADDED_SCORE=""
+          TITLE_LEVEL=""
+          WARNING_LEVEL=""
+          if [ -n "$RAW_SCORE" ]; then
+            PADDED_SCORE=$(printf "%03d" "$RAW_SCORE" 2>/dev/null || echo "$RAW_SCORE")
+            
+            # Level bands: [0..21] green (low), (21..56] yellow (medium), (56..100] red (high)
+            if [ "$RAW_SCORE" -le 21 ]; then
+              TITLE_LEVEL="low"
+              WARNING_LEVEL="green (low)"
+            elif [ "$RAW_SCORE" -le 56 ]; then
+              TITLE_LEVEL="medium"
+              WARNING_LEVEL="yellow (medium)"
+            else
+              TITLE_LEVEL="high"
+              WARNING_LEVEL="red (high)"
+            fi
+          fi
+
+          # 4. Determine Task Title dynamically if not explicitly provided
+          if [ -n "$USER_TITLE" ]; then
+            FINAL_TITLE="$USER_TITLE"
+          else
+            # Build comma-space separated prefix
+            PREFIX=""
+            if [ -n "$PADDED_SCORE" ]; then
+              PREFIX="CS_Score $PADDED_SCORE ($TITLE_LEVEL), CS_ID $WARNING_ID"
+            else
+              PREFIX="CS_ID $WARNING_ID"
+            fi
+            
+            # Append filename with comma space if provided
+            TITLE_BODY="$WARNING_NAME"
+            if [ -n "$FILENAME" ]; then
+              TITLE_BODY="$TITLE_BODY, $FILENAME"
+            fi
+            
+            FINAL_TITLE="[$PREFIX] $TITLE_BODY"
+          fi
+
+          # 5. Build Description in HTML format
+          DESC="<b>CodeSonar Warning ID:</b> $WARNING_ID<br/><b>Warning Type:</b> $WARNING_NAME"
+          if [ -n "$RAW_SCORE" ]; then
+            DESC="$DESC<br/><b>CodeSonar Score [0-100]:</b> $RAW_SCORE<br/><b>CodeSonar Warning Level:</b> $WARNING_LEVEL"
+          fi
+          if [ -n "$FILENAME" ]; then
+            DESC="$DESC<br/><b>File:</b> $FILENAME"
+          fi
+          DESC="$DESC<br/><b>Hub Link:</b> <a href='$FINAL_LINK'>$FINAL_LINK</a>"
+
+          curl -X POST \
+            -u ":$ADO_PAT" \
+            -H "Content-Type: application/json-patch+json" \
+            "https://dev.azure.com/$ADO_ORG/$ADO_PROJECT/_apis/wit/workitems/\$Task?api-version=7.1" \
+            -d "[
+              {
+                \"op\": \"add\",
+                \"path\": \"/fields/System.Title\",
+                \"value\": \"$FINAL_TITLE\"
+              },
+              {
+                \"op\": \"add\",
+                \"path\": \"/fields/System.Description\",
+                \"value\": \"$DESC\"
+              },
+              {
+                \"op\": \"add\",
+                \"path\": \"/fields/System.Tags\",
+                \"value\": \"CodeSonar\"
+              }
+            ]"
+
+          echo "Azure DevOps Work Item created successfully!"
+          echo "Title: $FINAL_TITLE"
