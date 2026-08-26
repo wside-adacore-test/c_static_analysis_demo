@@ -1,0 +1,97 @@
+name: Create Azure Work Item from GitHub Code Scanning Alert
+
+on:
+  workflow_dispatch:
+    inputs:
+      alert_number:
+        description: 'GitHub Security Alert Number (e.g., 42)'
+        required: true
+        type: string
+      title:
+        description: 'Task Title (Optional - defaults to Alert Rule Description)'
+        required: false
+        type: string
+
+permissions:
+  security-events: read
+  contents: read
+
+jobs:
+  create-azure-work-item:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Security Alert & Post to Azure DevOps
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+          ADO_ORG: "wside"
+          ADO_PROJECT: "test-devops"
+          REPO: ${{ github.repository }}
+          ALERT_NUM: ${{ inputs.alert_number }}
+          USER_TITLE: ${{ inputs.title }}
+        run: |
+          # 1. Fetch Alert JSON with error checks
+          ALERT_JSON=$(curl -s -S --fail \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/code-scanning/alerts/$ALERT_NUM")
+
+          if [ -z "$ALERT_JSON" ]; then
+            echo "Error: Could not retrieve alert details from GitHub API."
+            exit 1
+          fi
+
+          RULE_ID=$(echo "$ALERT_JSON" | jq -r '.rule.id // "N/A"')
+          # Look for the short name like "Use After Free"
+          RULE_DESC=$(echo "$ALERT_JSON" | jq -r '(.rule.description // empty) // (.rule.name // empty) // "Security Alert"')
+          FILE_PATH=$(echo "$ALERT_JSON" | jq -r '.most_recent_instance.location.path // "N/A"')
+          START_LINE=$(echo "$ALERT_JSON" | jq -r '.most_recent_instance.location.start_line // "N/A"')
+          HTML_URL=$(echo "$ALERT_JSON" | jq -r '.html_url // ""')
+
+          # Extract raw markdown body (help usually contains the third-party SARIF markdown)
+          RAW_MARKDOWN=$(echo "$ALERT_JSON" | jq -r '
+            (.rule.help // empty) // 
+            (.rule.full_description // empty) // 
+            (.most_recent_instance.message.text // empty) // 
+            "No detailed description provided by the scanning tool."
+          ')
+
+          # 2. Render Markdown into HTML via GitHub API
+          HTML_BODY=$(curl -s -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/markdown \
+            -d "$(jq -n --arg text "$RAW_MARKDOWN" '{text: $text}')")
+
+          # 3. Formulate Title securely
+          BASE_TITLE="${USER_TITLE:-$RULE_DESC}"
+          FINAL_TITLE="[GitHub Code Scanning Alert #${ALERT_NUM}] ${BASE_TITLE}"
+
+          # 4. Construct ADO HTML Description
+          FULL_DESCRIPTION="<b>GitHub Security Alert #${ALERT_NUM}</b><br/>"
+          FULL_DESCRIPTION+="<b>Rule:</b> ${RULE_ID}<br/>"
+          FULL_DESCRIPTION+="<b>Location:</b> <code>${FILE_PATH}</code> (Line ${START_LINE})<br/>"
+          FULL_DESCRIPTION+="<b>Link:</b> <a href=\"${HTML_URL}\">${HTML_URL}</a><hr/>"
+          FULL_DESCRIPTION+="<h3>Alert Details</h3>${HTML_BODY}"
+
+          TAGS="Security; GH-Alert-${ALERT_NUM}; ${RULE_ID}"
+
+          # 5. Build full JSON payload via jq
+          PAYLOAD=$(jq -n \
+            --arg title "$FINAL_TITLE" \
+            --arg desc "$FULL_DESCRIPTION" \
+            --arg tags "$TAGS" \
+            '[
+              {"op": "add", "path": "/fields/System.Title", "value": $title},
+              {"op": "add", "path": "/fields/System.Description", "value": $desc},
+              {"op": "add", "path": "/fields/System.Tags", "value": $tags}
+            ]')
+
+          # 6. Post Payload to Azure DevOps
+          curl -s -S --fail-with-body -X POST \
+            -u ":$ADO_PAT" \
+            -H "Content-Type: application/json-patch+json" \
+            "https://dev.azure.com/$ADO_ORG/$ADO_PROJECT/_apis/wit/workitems/\$Task?api-version=7.1" \
+            -d "$PAYLOAD"
+
+          echo "Successfully created Azure Work Item for Security Alert #${ALERT_NUM}!"

@@ -1,0 +1,73 @@
+name: Create Azure Work Item for CodeSonar Warning
+
+on:
+  workflow_dispatch:
+    inputs:
+      warning_id:
+        description: 'CodeSonar Warning ID (e.g., 406.6049)'
+        required: true
+        type: string
+      title:
+        description: 'Task Title (e.g., Fix Leak in math_utils.c)'
+        required: true
+        type: string
+      sarif_file:
+        description: 'Path to SARIF report'
+        required: false
+        default: 'saved-sarifs/code-sonar-analysis-certc-cwe2025.sarif'
+        type: string
+
+jobs:
+  create-azure-work-item:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Extract Warning Details & Post to Azure DevOps
+        env:
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+          ADO_ORG: "wside"
+          ADO_PROJECT: "test-devops"
+        run: |
+          WARNING_ID="${{ inputs.warning_id }}"
+          TITLE="${{ inputs.title }}"
+          SARIF_FILE="${{ inputs.sarif_file }}"
+
+          echo "Searching for Warning ID $WARNING_ID in $SARIF_FILE..."
+
+          # Extract rule details from SARIF matching the Warning ID using jq
+          DETAILS=$(jq -r --arg id "$WARNING_ID" '
+            .runs[0].results[] 
+            | select(.ruleId | contains($id)) 
+            | "File: \(.locations[0].physicalLocation.artifactLocation.uri) (Line \(.locations[0].physicalLocation.region.startLine))<br/>Message: \(.message.text)"
+          ' "$SARIF_FILE" 2>/dev/null | head -n 1 || true)
+
+          if [ -z "$DETAILS" ]; then
+            DETAILS="Manual alert generated for CodeSonar Warning ID: $WARNING_ID"
+          fi
+
+          # Post Work Item directly to Azure DevOps REST API
+          curl -X POST \
+            -u ":$ADO_PAT" \
+            -H "Content-Type: application/json-patch+json" \
+            "https://dev.azure.com/$ADO_ORG/$ADO_PROJECT/_apis/wit/workitems/\$Task?api-version=7.1" \
+            -d "[
+              {
+                \"op\": \"add\",
+                \"path\": \"/fields/System.Title\",
+                \"value\": \"[CodeSonar $WARNING_ID] $TITLE\"
+              },
+              {
+                \"op\": \"add\",
+                \"path\": \"/fields/System.Description\",
+                \"value\": \"<b>CodeSonar Warning ID:</b> $WARNING_ID<br/><b>Details:</b> $DETAILS\"
+              },
+              {
+                \"op\": \"add\",
+                \"path\": \"/fields/System.Tags\",
+                \"value\": \"CodeSonar; CS-ID-$WARNING_ID\"
+              }
+            ]"
+          
+          echo "Azure DevOps Work Item successfully created for Warning $WARNING_ID!"
