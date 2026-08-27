@@ -4,7 +4,16 @@ import os
 import sys
 import pandas as pd
 
-def convert_codesonar_to_ado(input_csv, output_csv=None):
+def get_warning_level(score):
+    """Return full level string and short level tag based on CodeSonar score pivots."""
+    if score <= 21:
+        return "green (low)", "low"
+    elif score <= 56:
+        return "yellow (medium)", "medium"
+    else:
+        return "red (high)", "high"
+
+def convert_codesonar_to_ado(input_csv, output_csv=None, hub_url="http://localhost:7341"):
     # Determine output filename if not explicitly provided
     if not output_csv:
         base, ext = os.path.splitext(input_csv)
@@ -19,37 +28,53 @@ def convert_codesonar_to_ado(input_csv, output_csv=None):
         print(f"Error reading '{input_csv}': {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Initialize DataFrame with the same index length as input data
-    ado_df = pd.DataFrame(index=df.index)
-    
-    # Set Work Item Type explicitly
-    ado_df['Work Item Type'] = 'Task'
+    # Clean hub URL base
+    hub_base = hub_url.rstrip('/')
 
-    # Title format: "filename - type - CS-ID <id>"
-    ado_df['Title'] = (
-        df['file'].astype(str) + ' - ' + 
-        df['class'].astype(str) + ' - CS-ID ' + 
-        df['id'].astype(str)
-    )
+    titles = []
+    descriptions = []
 
-    # HTML Description with full warning details
-    ado_df['Description'] = (
-        "<b>CodeSonar Warning Details:</b><br/>" +
-        "<ul>" +
-        "  <li><b>ID:</b> " + df['id'].astype(str) + "</li>" +
-        "  <li><b>File:</b> " + df['file'].astype(str) + " (Line " + df['line number'].astype(str) + ")</li>" +
-        "  <li><b>Procedure:</b> " + df['procedure'].fillna('N/A').astype(str) + "</li>" +
-        "  <li><b>Class:</b> " + df['class'].astype(str) + "</li>" +
-        "  <li><b>Significance:</b> " + df['significance'].astype(str) + "</li>" +
-        "  <li><b>Score:</b> " + df['score'].astype(str) + "</li>" +
-        "</ul>"
-    )
+    for _, row in df.iterrows():
+        score = int(row['score'])
+        cs_id = row['id']
+        cs_class = row['class']
+        significance = row['significance']
+        filename = row['file']
+        raw_url = str(row['url'])
 
-    # Tags: CodeSonar; CS-ID-<id>; <Warning Type/Class>
-    ado_df['Tags'] = (
-        "CodeSonar; CS-ID-" + df['id'].astype(str) + 
-        "; " + df['class'].astype(str)
-    )
+        level_str, short_level = get_warning_level(score)
+
+        # Build Title
+        title = f"[CS_Score {score:03d} ({short_level}), CS_ID {cs_id}, {significance}] {cs_class}, {filename}"
+        titles.append(title)
+
+        # Format Hub URL (replace .txt with .html)
+        if raw_url.endswith('.txt'):
+            html_url = raw_url[:-4] + '.html'
+        else:
+            html_url = raw_url
+        full_hub_link = f"{hub_base}/{html_url.lstrip('/')}"
+
+        # Using single quotes for href prevents pandas from escaping quotes as "" in CSV,
+        # which allows Azure DevOps to parse the HTML string properly.
+        desc = (
+            f"<div><b>CodeSonar Warning ID:</b> {cs_id}</div>"
+            f"<div><b>Warning Type:</b> {cs_class}</div>"
+            f"<div><b>CodeSonar Score [0-100]:</b> {score}</div>"
+            f"<div><b>CodeSonar Warning Level:</b> {level_str}</div>"
+            f"<div><b>CodeSonar Warning Significance:</b> {significance}</div>"
+            f"<div><b>File:</b> {filename}</div>"
+            f"<div><b>Hub Link:</b> <a href='{full_hub_link}'>{full_hub_link}</a></div>"
+        )
+        descriptions.append(desc)
+
+    # Construct ADO output DataFrame
+    ado_df = pd.DataFrame({
+        'Work Item Type': 'Task',
+        'Title': titles,
+        'Description': descriptions,
+        'Tags': 'CodeSonar; imported-from-CSV'
+    })
 
     # Export to CSV
     ado_df.to_csv(output_csv, index=False)
@@ -69,9 +94,15 @@ def main():
         default=None,
         help="Path to output converted CSV (default: input file suffixed with '_for_ado')"
     )
+    parser.add_argument(
+        "--hub",
+        dest="hub_url",
+        default="http://localhost:7341",
+        help="CodeSonar Hub base URL (default: http://localhost:7341)"
+    )
 
     args = parser.parse_args()
-    convert_codesonar_to_ado(args.input_csv, args.output_csv)
+    convert_codesonar_to_ado(args.input_csv, args.output_csv, args.hub_url)
 
 if __name__ == "__main__":
     main()
