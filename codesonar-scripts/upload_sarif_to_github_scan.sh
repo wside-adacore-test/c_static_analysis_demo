@@ -70,7 +70,7 @@ RESPONSE=$(gh api \
   -f commit_sha="$COMMIT_SHA" \
   -f ref="$REF" \
   -f sarif="$GZIP_B64" \
-  -f tool_name="CodeSonar")
+  -f tool_name="codesonar-scan")
 
 echo "[+] Upload complete!"
 echo "$RESPONSE"

@@ -10,10 +10,10 @@ void process_data(int mode) {
         ptr = "High Mode";
     }
 
-    /* Bug 6: Conditional Null Pointer Dereference 
-       If mode <= 5, ptr remains NULL when passed to printf %s. */
+    /* Bug 6: Conditional Null Pointer Dereference */
     if (mode != 0) {
-        printf("Mode String: %s\n", ptr); 
+        char first_char = *ptr;
+        printf("Mode String: %s\n", first_char); 
     }
 }
 
@@ -22,8 +22,6 @@ int main() {
     StringBuffer *my_buf = create_buffer(10);
     append_string(my_buf, "Hello World!!"); /* Triggers Bug 4 */
     print_buffer(my_buf);
-
-    process_data(2); /* Triggers Bug 6 */
 
     free_buffer(my_buf);
     free_buffer(my_buf); /* Bug 7: Double Free */
@@ -43,6 +41,8 @@ int main() {
 
     int div = divide_numbers(10, 0); /* Triggers Bug 9 (Division by Zero) */
     printf("Division result: %d\n", div);
+
+    //process_data(2); /* Triggers Bug 6 */
 
     return 0;
 }
